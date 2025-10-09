@@ -55,6 +55,13 @@ class Config:
     
     # Data augmentation
     USE_AUGMENTATION = True
+    USE_CONTEXTUAL_AUG = True
+    USE_BACK_TRANSLATION = False
+    USE_SMOTE = False  # Use SMOTE for tabular features
+    BACK_TRANS_LANGUAGES = ['de', 'fr']  # German, French
+    AUG_TARGET_CLASSES = ['GA', 'FA']  # Minority classes to augment
+    AUG_SAMPLES_PER_CLASS = 30  # Maximum augmented samples to generate per class (not multiplier!)
+    
     SMOTE_SAMPLING = {
         'GA': 0.4,  # 40% oversampling
         'FA': 1.8   # 180% oversampling

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup, pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, f1_score, classification_report
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -12,8 +12,12 @@ from imblearn.over_sampling import SMOTE
 import logging
 from datetime import datetime
 from tqdm import tqdm
+import random
 import warnings
 warnings.filterwarnings('ignore')
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 class TextAugmenter:
     """
