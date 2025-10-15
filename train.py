@@ -13,7 +13,19 @@ import logging
 from datetime import datetime
 from tqdm import tqdm
 import warnings
+import random
 warnings.filterwarnings('ignore')
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('training.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class Trainer:
     """Main trainer class"""
@@ -49,12 +61,13 @@ class Trainer:
     def augment_minority_classes(self, texts, tabular_features, labels, label_encoder):
         """
         Augment text untuk minority classes menggunakan Contextual Augmentation & Back Translation
+        Limited augmentation - only generate specified number of samples per class
         """
         logger.info("Starting text augmentation for minority classes...")
         
-        augmented_texts = list(texts)
-        augmented_tabular = list(tabular_features)
-        augmented_labels = list(labels)
+        augmented_texts = []
+        augmented_tabular = []
+        augmented_labels = []
         
         # Decode labels untuk identifikasi class
         label_names = label_encoder.inverse_transform(labels)
@@ -62,53 +75,63 @@ class Trainer:
         # Track augmentation statistics
         aug_stats = {cls: 0 for cls in self.config.AUG_TARGET_CLASSES}
         
-        for i, (text, tab_feat, label, label_name) in enumerate(
-            tqdm(zip(texts, tabular_features, labels, label_names), 
-                 desc="Augmenting texts", total=len(texts))
-        ):
-            # Hanya augment jika termasuk target class
+        # Collect minority class samples
+        minority_samples = {cls: [] for cls in self.config.AUG_TARGET_CLASSES}
+        
+        for i, (text, tab_feat, label, label_name) in enumerate(zip(texts, tabular_features, labels, label_names)):
             if label_name in self.config.AUG_TARGET_CLASSES:
-                multiplier = self.config.AUG_MULTIPLIER.get(label_name, 1)
+                minority_samples[label_name].append((text, tab_feat, label))
+        
+        # Generate limited augmented samples per class
+        for cls in self.config.AUG_TARGET_CLASSES:
+            samples = minority_samples[cls]
+            if len(samples) == 0:
+                continue
+            
+            max_aug = min(self.config.AUG_SAMPLES_PER_CLASS, len(samples))
+            logger.info(f"Augmenting {max_aug} samples for class {cls}")
+            
+            # Randomly select samples to augment
+            selected_indices = np.random.choice(len(samples), size=max_aug, replace=False)
+            
+            for idx in tqdm(selected_indices, desc=f"Augmenting {cls}"):
+                text, tab_feat, label = samples[idx]
                 
-                for _ in range(multiplier):
-                    # Pilih random augmentation method
-                    aug_method = random.choice(['contextual', 'back_trans', 'both'])
-                    
-                    # Augment text
-                    aug_text = self.text_augmenter.augment_text(text, method=aug_method)
-                    
-                    # Add augmented sample
-                    augmented_texts.append(aug_text)
-                    augmented_tabular.append(tab_feat)
-                    augmented_labels.append(label)
-                    
-                    aug_stats[label_name] += 1
+                # Pilih random augmentation method
+                aug_method = 'contextual' if self.config.USE_CONTEXTUAL_AUG else 'back_trans'
+                
+                # Augment text
+                aug_text = self.text_augmenter.augment_text(text, method=aug_method)
+                
+                # Add augmented sample
+                augmented_texts.append(aug_text)
+                augmented_tabular.append(tab_feat)
+                augmented_labels.append(label)
+                
+                aug_stats[cls] += 1
         
         logger.info("Text augmentation completed!")
         logger.info("Augmentation statistics:")
         for cls, count in aug_stats.items():
             logger.info(f"  {cls}: +{count} augmented samples")
         
-        return (np.array(augmented_texts), 
-                np.array(augmented_tabular), 
-                np.array(augmented_labels))
+        # Combine original + augmented
+        all_texts = np.concatenate([texts, np.array(augmented_texts)])
+        all_tabular = np.vstack([tabular_features, np.array(augmented_tabular)])
+        all_labels = np.concatenate([labels, np.array(augmented_labels)])
+        
+        return all_texts, all_tabular, all_labels
     
-    def prepare_data(self, df, text_column, tabular_columns, label_column):
+    def prepare_data(self, texts, tabular_features, labels):
         """
         Prepare data dengan augmentation dan preprocessing
         
         Args:
-            df: DataFrame dengan columns untuk text, tabular features, dan labels
-            text_column: nama kolom untuk text artikel
-            tabular_columns: list nama kolom untuk fitur tabular
-            label_column: nama kolom untuk quality label
+            texts: numpy array of text strings
+            tabular_features: numpy array of tabular features
+            labels: numpy array of class labels
         """
         logger.info("Preparing data...")
-        
-        # Extract features
-        texts = df[text_column].values
-        tabular_features = df[tabular_columns].values
-        labels = df[label_column].values
         
         # Encode labels
         self.label_encoder = LabelEncoder()
@@ -350,4 +373,106 @@ class Trainer:
             # Print detailed classification report setiap 5 epoch
             if epoch % 5 == 0:
                 logger.info("\nDetailed Classification Report:")
-                report = classification
+                report = classification_report(
+                    val_labels, val_preds,
+                    target_names=self.label_encoder.classes_,
+                    zero_division=0
+                )
+                logger.info(f"\n{report}")
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("Training completed!")
+        logger.info("=" * 80)
+    
+    def save_model(self, epoch, val_loss, val_acc, val_f1, val_roc_auc):
+        """Save model checkpoint"""
+        os.makedirs(self.config.OUTPUT_DIR, exist_ok=True)
+        
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'val_f1': val_f1,
+            'val_roc_auc': val_roc_auc,
+            'label_encoder': self.label_encoder,
+            'scaler': self.scaler,
+            'config': self.config
+        }
+        
+        save_path = os.path.join(self.config.OUTPUT_DIR, self.config.MODEL_SAVE_PATH)
+        torch.save(checkpoint, save_path)
+
+
+if __name__ == "__main__":
+    from config import Config, logger
+    from data_loader import MedicalArticleDataLoader
+    from architecture import BioBERTMultiInputClassifier
+    from dataset import MedicalArticleDataset
+    from augment import TextAugmenter
+    from trainer_log import TrainingLogger
+    
+    # Set random seed
+    torch.manual_seed(Config.SEED)
+    np.random.seed(Config.SEED)
+    
+    # Create output directory
+    os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+    
+    logger.info("=" * 80)
+    logger.info("BioBERT Medical Article Quality Classification")
+    logger.info("=" * 80)
+    
+    # Load configuration
+    config = Config()
+    logger.info(f"Device: {config.DEVICE}")
+    logger.info(f"Model: {config.MODEL_NAME}")
+    logger.info(f"Batch size: {config.BATCH_SIZE}")
+    logger.info(f"Epochs: {config.EPOCHS}")
+    logger.info(f"Learning rate: {config.LEARNING_RATE}")
+    
+    # Load data
+    logger.info("\n" + "=" * 80)
+    logger.info("Loading data...")
+    logger.info("=" * 80)
+    
+    loader = MedicalArticleDataLoader('final_dataset_fix_banget_real.jsonl')
+    texts, tabular_features, labels = loader.preprocess()
+    
+    # Display dataset info
+    info = loader.get_info()
+    logger.info(f"Total samples: {info['total_samples']}")
+    logger.info(f"Number of classes: {info['num_classes']}")
+    logger.info(f"Classes: {info['classes']}")
+    logger.info(f"Tabular features ({info['num_tabular_features']}): {info['tabular_features']}")
+    
+    # Display class distribution
+    logger.info("\nClass distribution:")
+    class_dist = loader.get_class_distribution()
+    for cls, count in class_dist.items():
+        logger.info(f"  {cls}: {count} ({count/len(texts)*100:.2f}%)")
+    
+    # Create trainer
+    logger.info("\n" + "=" * 80)
+    logger.info("Initializing trainer...")
+    logger.info("=" * 80)
+    
+    trainer = Trainer(config)
+    
+    # Prepare data
+    logger.info("\n" + "=" * 80)
+    logger.info("Preparing data...")
+    logger.info("=" * 80)
+    
+    trainer.prepare_data(texts, tabular_features, labels)
+    
+    # Train model
+    trainer.train()
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("Training pipeline completed successfully!")
+    logger.info(f"Best model saved to: {os.path.join(config.OUTPUT_DIR, config.MODEL_SAVE_PATH)}")
+    logger.info(f"Training log saved to: {os.path.join(config.OUTPUT_DIR, config.LOG_FILE)}")
+    logger.info("=" * 80)
